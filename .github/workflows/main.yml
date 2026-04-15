@@ -142,11 +142,30 @@ jobs:
         continue-on-error: true
         run: |
           cd ${{ env.BUILD_DIR }}
-          source build/envsetup.sh
-          breakfast ${{ env.DEVICE }}
+          
+          echo "===== Setup Environment =====" | tee ~/build.log
+          source build/envsetup.sh 2>&1 | tee -a ~/build.log
+          if [ $? -ne 0 ]; then
+            echo "ERROR: envsetup.sh failed" | tee -a ~/build.log
+            exit 1
+          fi
+          
+          echo "===== Running breakfast ${{ env.DEVICE }} =====" | tee -a ~/build.log
+          breakfast ${{ env.DEVICE }} 2>&1 | tee -a ~/build.log
+          if [ $? -ne 0 ]; then
+            echo "ERROR: breakfast failed. Check device tree compatibility." | tee -a ~/build.log
+            exit 1
+          fi
+          
+          echo "===== Starting Build (bacon) =====" | tee -a ~/build.log
           export TARGET_NO_KERNEL=true
-          mka bacon 2>&1 | tee ~/build.log
-          if [ -f /tmp/build_timeout ]; then
+          mka bacon 2>&1 | tee -a ~/build.log
+          BUILD_EXIT_CODE=${PIPESTATUS[0]}
+          
+          if [ $BUILD_EXIT_CODE -ne 0 ]; then
+            echo "ERROR: mka bacon failed with code $BUILD_EXIT_CODE" | tee -a ~/build.log
+            echo "status=failed" >> $GITHUB_OUTPUT
+          elif [ -f /tmp/build_timeout ]; then
             echo "status=timeout" >> $GITHUB_OUTPUT
           else
             echo "status=success" >> $GITHUB_OUTPUT
