@@ -86,7 +86,6 @@ jobs:
           sed -i '/kernel\/samsung\/exynos7885/d' .repo/local_manifests/manifest.xml
           repo sync \
             -c -j$(nproc --all) \
-            --depth=1 \
             --no-tags \
             --no-clone-bundle \
             --force-sync \
