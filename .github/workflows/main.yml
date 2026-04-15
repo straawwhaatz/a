@@ -18,38 +18,17 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Free up root disk space
-        run: |
-          sudo swapoff -a
-          sudo rm -f /swapfile
-          sudo apt-get clean -y
-          sudo apt-get remove -y --fix-missing \
-            '^dotnet-.*' '^llvm-.*' '^mongodb-.*' '^mysql-.*' \
-            '^php.*' azure-cli google-chrome-stable firefox \
-            powershell mono-devel libgl1-mesa-dri \
-            google-cloud-cli google-cloud-sdk \
-            temurin-11-jdk temurin-17-jdk temurin-21-jdk \
-            ant ant-optional kubectl 2>/dev/null || true
-          sudo apt-get autoremove -y
-          sudo apt-get autoclean -y
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /usr/local/share/chromium \
-            /usr/local/share/powershell \
-            /opt/ghc \
-            /opt/hostedtoolcache \
-            /opt/pipx \
-            /usr/lib/jvm \
-            /usr/lib/mono \
-            /usr/share/swift \
-            /usr/local/julia* \
-            /usr/local/go \
-            /usr/share/rust \
-            "$AGENT_TOOLSDIRECTORY"
-          sudo docker image prune --all --force 2>/dev/null || true
-          df -h
-
+      - name: Free up root disk space (Aggressive)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      
       - name: Setup build and ccache on large disk
         run: |
           sudo mkdir -p /mnt/android/lineage
@@ -142,28 +121,19 @@ jobs:
         continue-on-error: true
         run: |
           cd ${{ env.BUILD_DIR }}
+          {
+            echo "===== Setup Environment ====="
+            . build/envsetup.sh
+            echo "===== Running breakfast ${{ env.DEVICE }} ====="
+            breakfast ${{ env.DEVICE }}
+            echo "===== Starting Build (bacon) ====="
+            export TARGET_NO_KERNEL=true
+            mka bacon
+          } 2>&1 | tee ~/build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
           
-          echo "===== Setup Environment =====" | tee ~/build.log
-          source build/envsetup.sh 2>&1 | tee -a ~/build.log
-          if [ $? -ne 0 ]; then
-            echo "ERROR: envsetup.sh failed" | tee -a ~/build.log
-            exit 1
-          fi
-          
-          echo "===== Running breakfast ${{ env.DEVICE }} =====" | tee -a ~/build.log
-          breakfast ${{ env.DEVICE }} 2>&1 | tee -a ~/build.log
-          if [ $? -ne 0 ]; then
-            echo "ERROR: breakfast failed. Check device tree compatibility." | tee -a ~/build.log
-            exit 1
-          fi
-          
-          echo "===== Starting Build (bacon) =====" | tee -a ~/build.log
-          export TARGET_NO_KERNEL=true
-          mka bacon 2>&1 | tee -a ~/build.log
-          BUILD_EXIT_CODE=${PIPESTATUS[0]}
-          
-          if [ $BUILD_EXIT_CODE -ne 0 ]; then
-            echo "ERROR: mka bacon failed with code $BUILD_EXIT_CODE" | tee -a ~/build.log
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo "ERROR: Build failed with code $BUILD_EXIT" | tee -a ~/build.log
             echo "status=failed" >> $GITHUB_OUTPUT
           elif [ -f /tmp/build_timeout ]; then
             echo "status=timeout" >> $GITHUB_OUTPUT
