@@ -8,8 +8,9 @@ on:
 env:
   DEVICE: a30
   BUILD_TYPE: userdebug
-  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_DIR: /mnt/ccache
   CCACHE_SIZE: 8G
+  BUILD_DIR: /mnt/android/lineage
 
 jobs:
   build:
@@ -17,19 +18,52 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 4096
-          swap-size-mb: 8192
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
+      - name: Free up root disk space
+        run: |
+          sudo swapoff -a
+          sudo rm -f /swapfile
+          sudo apt-get clean -y
+          sudo apt-get remove -y --fix-missing \
+            '^dotnet-.*' '^llvm-.*' '^mongodb-.*' '^mysql-.*' \
+            '^php.*' azure-cli google-chrome-stable firefox \
+            powershell mono-devel libgl1-mesa-dri \
+            google-cloud-cli google-cloud-sdk \
+            temurin-11-jdk temurin-17-jdk temurin-21-jdk \
+            ant ant-optional kubectl 2>/dev/null || true
+          sudo apt-get autoremove -y
+          sudo apt-get autoclean -y
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/share/chromium \
+            /usr/local/share/powershell \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /opt/pipx \
+            /usr/lib/jvm \
+            /usr/lib/mono \
+            /usr/share/swift \
+            /usr/local/julia* \
+            /usr/local/go \
+            /usr/share/rust \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force 2>/dev/null || true
+          df -h
 
-      - name: Show available disk space
-        run: df -h
+      - name: Setup build and ccache on large disk
+        run: |
+          sudo mkdir -p /mnt/android/lineage
+          sudo mkdir -p /mnt/ccache
+          sudo chown -R runner:runner /mnt/android /mnt/ccache
+          df -h
+
+      - name: Create swap on large disk
+        run: |
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
 
       - name: Install dependencies
         run: |
@@ -67,12 +101,10 @@ jobs:
           ccache -z
           echo "USE_CCACHE=1" >> $GITHUB_ENV
           echo "CCACHE_EXEC=$(which ccache)" >> $GITHUB_ENV
-          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
 
       - name: Sync source
         run: |
-          mkdir -p ~/android/lineage
-          cd ~/android/lineage
+          cd ${{ env.BUILD_DIR }}
           repo init \
             -u https://github.com/LineageOS/android.git \
             -b lineage-23.2 \
@@ -92,6 +124,9 @@ jobs:
             --optimized-fetch \
             --prune
 
+      - name: Show disk space after sync
+        run: df -h
+
       - name: Start watchdog
         run: |
           (
@@ -106,7 +141,7 @@ jobs:
         id: build
         continue-on-error: true
         run: |
-          cd ~/android/lineage
+          cd ${{ env.BUILD_DIR }}
           source build/envsetup.sh
           breakfast ${{ env.DEVICE }}
           export TARGET_NO_KERNEL=true
@@ -139,19 +174,16 @@ jobs:
       - name: Upload ROM to Gofile
         if: steps.build.outputs.status == 'success'
         run: |
-          ZIP=$(find ~/android/lineage/out/target/product/${{ env.DEVICE }} -maxdepth 1 -name "lineage-*.zip" | head -1)
+          ZIP=$(find ${{ env.BUILD_DIR }}/out/target/product/${{ env.DEVICE }} -maxdepth 1 -name "lineage-*.zip" | head -1)
           if [ -z "$ZIP" ]; then
-            echo "No ROM zip found, skipping upload"
-            exit 0
+            echo "No ROM zip found"
+            exit 1
           fi
           SERVER=$(curl -s https://api.gofile.io/servers | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['servers'][0]['name'])")
-          echo "Uploading to gofile server: $SERVER"
+          echo "Uploading to: $SERVER"
           RESPONSE=$(curl -s -F "file=@${ZIP}" https://${SERVER}.gofile.io/uploadFile)
-          echo "Gofile response: $RESPONSE"
+          echo "$RESPONSE"
           LINK=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['downloadPage'])")
-          echo "========================================="
-          echo "Download link: $LINK"
-          echo "========================================="
-          echo "gofile_link=$LINK" >> $GITHUB_STEP_SUMMARY
-          echo "## ROM Ready" >> $GITHUB_STEP_SUMMARY
-          echo "Download: $LINK" >> $GITHUB_STEP_SUMMARY
+          echo "## ROM Download" >> $GITHUB_STEP_SUMMARY
+          echo "$LINK" >> $GITHUB_STEP_SUMMARY
+          echo "Download: $LINK"
