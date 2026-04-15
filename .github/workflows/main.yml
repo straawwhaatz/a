@@ -1,0 +1,158 @@
+name: LineageOS 23.2 - SM-A305F
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  DEVICE: a30
+  BUILD_TYPE: userdebug
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_SIZE: 8G
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 4096
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Show available disk space
+        run: df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf imagemagick \
+            lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool \
+            libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3
+
+      - name: Install repo
+        run: |
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Git config
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ env.DEVICE }}-${{ github.run_number }}
+          restore-keys: ccache-${{ env.DEVICE }}-
+
+      - name: Setup ccache
+        run: |
+          ccache -M ${{ env.CCACHE_SIZE }}
+          ccache -z
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "CCACHE_EXEC=$(which ccache)" >> $GITHUB_ENV
+          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
+
+      - name: Sync source
+        run: |
+          mkdir -p ~/android/lineage
+          cd ~/android/lineage
+          repo init \
+            -u https://github.com/LineageOS/android.git \
+            -b lineage-23.2 \
+            --depth=1 \
+            --no-tags \
+            --no-clone-bundle
+          git clone \
+            https://github.com/straawwhaatz/local_manifests.git \
+            -b Exynos7885-new-sixteen \
+            .repo/local_manifests
+          sed -i '/kernel\/samsung\/exynos7885/d' .repo/local_manifests/manifest.xml
+          repo sync \
+            -c -j$(nproc --all) \
+            --depth=1 \
+            --no-tags \
+            --no-clone-bundle \
+            --force-sync \
+            --optimized-fetch \
+            --prune
+
+      - name: Start watchdog
+        run: |
+          (
+            sleep $((5 * 3600 + 30 * 60))
+            touch /tmp/build_timeout
+            pkill -f ninja || true
+            pkill -f make || true
+          ) &
+          echo $! > /tmp/watchdog.pid
+
+      - name: Build
+        id: build
+        continue-on-error: true
+        run: |
+          cd ~/android/lineage
+          source build/envsetup.sh
+          breakfast ${{ env.DEVICE }}
+          export TARGET_NO_KERNEL=true
+          mka bacon 2>&1 | tee ~/build.log
+          if [ -f /tmp/build_timeout ]; then
+            echo "status=timeout" >> $GITHUB_OUTPUT
+          else
+            echo "status=success" >> $GITHUB_OUTPUT
+          fi
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ env.DEVICE }}-${{ github.run_number }}
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: ~/build.log
+          retention-days: 3
+
+      - name: Upload ROM to Gofile
+        if: steps.build.outputs.status == 'success'
+        run: |
+          ZIP=$(find ~/android/lineage/out/target/product/${{ env.DEVICE }} -maxdepth 1 -name "lineage-*.zip" | head -1)
+          if [ -z "$ZIP" ]; then
+            echo "No ROM zip found, skipping upload"
+            exit 0
+          fi
+          SERVER=$(curl -s https://api.gofile.io/servers | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['servers'][0]['name'])")
+          echo "Uploading to gofile server: $SERVER"
+          RESPONSE=$(curl -s -F "file=@${ZIP}" https://${SERVER}.gofile.io/uploadFile)
+          echo "Gofile response: $RESPONSE"
+          LINK=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['downloadPage'])")
+          echo "========================================="
+          echo "Download link: $LINK"
+          echo "========================================="
+          echo "gofile_link=$LINK" >> $GITHUB_STEP_SUMMARY
+          echo "## ROM Ready" >> $GITHUB_STEP_SUMMARY
+          echo "Download: $LINK" >> $GITHUB_STEP_SUMMARY
